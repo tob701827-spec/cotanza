@@ -1,9 +1,42 @@
 // ============================================================================
-// CONFIGURACIÓN DE SUPABASE (Reemplazar con tus credenciales del proyecto)
+// CONFIGURACIÓN DE SUPABASE (Proyecto 06 - Préstamos de Herramientas)
+// Colegio Nacional E.M.D. Asunción Escalada
 // ============================================================================
 const SUPABASE_URL = 'https://ekgwlcopjscwuzlwsywv.supabase.co';
-const SUPABASE_ANON_KEY = "sb_publishable_Fq5OHITtfQApgRn5mPaefw_t_cJ455u"
-const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const SUPABASE_ANON_KEY = 'sb_publishable_Fq5OHITtfQApgRn5mPaefw_t_cJ455u';
+
+// Interceptor para compatibilidad con las nuevas claves Publishable de Supabase (sb_publishable_*)
+// Por defecto, supabase-js envía "Authorization: Bearer <clave>". Como las nuevas claves
+// publishable no son JWTs, el gateway Kong de Supabase rechaza la petición con error 401 Unauthorized.
+// Este wrapper retira el header Authorization cuando no es un JWT (no empieza con "Bearer eyJ"),
+// permitiendo que Supabase valide la petición correctamente a través del header "apikey".
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false
+    },
+    global: {
+        fetch: (url, options = {}) => {
+            const headers = new Headers(options.headers || {});
+            
+            // Asegurar que el header apikey esté siempre presente
+            if (!headers.has('apikey')) {
+                headers.set('apikey', SUPABASE_ANON_KEY);
+            }
+            
+            // Si Authorization contiene una clave que no es un JWT de usuario (eyJ...), la removemos
+            // para evitar que el validador JWT de Kong rechace la solicitud con 401 (Unauthorized)
+            const authHeader = headers.get('Authorization') || headers.get('authorization');
+            if (authHeader && !authHeader.startsWith('Bearer eyJ')) {
+                headers.delete('Authorization');
+                headers.delete('authorization');
+            }
+            
+            return fetch(url, { ...options, headers });
+        }
+    }
+});
 
 // Estado global en memoria
 let state = {
@@ -25,34 +58,44 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 function configurarFechaVencimientoPorDefecto() {
+    const inputVenc = document.getElementById('prestamoVencimiento');
+    if (!inputVenc) return;
     const manana = new Date(Date.now() + 24 * 60 * 60 * 1000);
     manana.setMinutes(manana.getMinutes() - manana.getTimezoneOffset());
-    document.getElementById('prestamoVencimiento').value = manana.toISOString().slice(0, 16);
+    inputVenc.value = manana.toISOString().slice(0, 16);
 }
 
 function mostrarFeedback(mensaje, tipo = 'neutral') {
     const banner = document.getElementById('feedbackBanner');
+    if (!banner) return;
     banner.className = `feedback-box ${tipo}`;
     banner.innerHTML = `<strong>[${new Date().toLocaleTimeString()}]</strong> ${mensaje}`;
 }
 
 function registrarEventos() {
     // Selector de Rol (Administrador vs Usuario de Consulta)
-    document.getElementById('selectRol').addEventListener('change', (e) => {
-        state.rol = e.target.value;
-        const badge = document.getElementById('rolBadge');
-        if (state.rol === 'CONSULTA') {
-            document.body.classList.add('role-consulta');
-            badge.textContent = 'SOLO CONSULTA';
-            badge.className = 'role-badge consulta';
-            mostrarFeedback('Modo Usuario de Consulta activado: Operaciones de escritura bloqueadas; solo visualización autorizada.', 'neutral');
-        } else {
-            document.body.classList.remove('role-consulta');
-            badge.textContent = 'ADMIN';
-            badge.className = 'role-badge admin';
-            mostrarFeedback('Modo Administrador activado: Operaciones de alta, baja, modificación, préstamo y devolución habilitadas.', 'success');
-        }
-    });
+    const selectRol = document.getElementById('selectRol');
+    if (selectRol) {
+        selectRol.addEventListener('change', (e) => {
+            state.rol = e.target.value;
+            const badge = document.getElementById('rolBadge');
+            if (state.rol === 'CONSULTA') {
+                document.body.classList.add('role-consulta');
+                if (badge) {
+                    badge.textContent = 'SOLO CONSULTA';
+                    badge.className = 'role-badge consulta';
+                }
+                mostrarFeedback('Modo Usuario de Consulta activado: Operaciones de escritura bloqueadas; solo visualización autorizada.', 'neutral');
+            } else {
+                document.body.classList.remove('role-consulta');
+                if (badge) {
+                    badge.textContent = 'ADMIN';
+                    badge.className = 'role-badge admin';
+                }
+                mostrarFeedback('Modo Administrador activado: Operaciones de alta, baja, modificación, préstamo y devolución habilitadas.', 'success');
+            }
+        });
+    }
 
     // Navegación por pestañas
     document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -60,90 +103,137 @@ function registrarEventos() {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             btn.classList.add('active');
-            document.getElementById(btn.dataset.tab).classList.add('active');
+            const target = document.getElementById(btn.dataset.tab);
+            if (target) target.classList.add('active');
         });
     });
 
     // Formularios principales
-    document.getElementById('formPrestamo').addEventListener('submit', handleRegistrarPrestamo);
-    document.getElementById('formDevolucion').addEventListener('submit', handleConfirmarDevolucion);
-    document.getElementById('btnCerrarModal').addEventListener('click', () => {
-        document.getElementById('modalDevolucion').classList.add('hidden');
-    });
+    const formPrestamo = document.getElementById('formPrestamo');
+    if (formPrestamo) formPrestamo.addEventListener('submit', handleRegistrarPrestamo);
 
-    document.getElementById('formHerramienta').addEventListener('submit', handleGuardarHerramienta);
-    document.getElementById('btnCancelarHerr').addEventListener('click', limpiarFormHerramienta);
+    const formDevolucion = document.getElementById('formDevolucion');
+    if (formDevolucion) formDevolucion.addEventListener('submit', handleConfirmarDevolucion);
 
-    document.getElementById('formUsuario').addEventListener('submit', handleGuardarUsuario);
-    document.getElementById('btnCancelarUsu').addEventListener('click', limpiarFormUsuario);
+    const btnCerrarModal = document.getElementById('btnCerrarModal');
+    if (btnCerrarModal) {
+        btnCerrarModal.addEventListener('click', () => {
+            document.getElementById('modalDevolucion')?.classList.add('hidden');
+        });
+    }
+
+    const formHerramienta = document.getElementById('formHerramienta');
+    if (formHerramienta) formHerramienta.addEventListener('submit', handleGuardarHerramienta);
+
+    const btnCancelarHerr = document.getElementById('btnCancelarHerr');
+    if (btnCancelarHerr) btnCancelarHerr.addEventListener('click', limpiarFormHerramienta);
+
+    const formUsuario = document.getElementById('formUsuario');
+    if (formUsuario) formUsuario.addEventListener('submit', handleGuardarUsuario);
+
+    const btnCancelarUsu = document.getElementById('btnCancelarUsu');
+    if (btnCancelarUsu) btnCancelarUsu.addEventListener('click', limpiarFormUsuario);
 
     // Filtros combinados, orden y paginación
     ['filtroTexto', 'filtroHerramienta', 'filtroUsuario', 'filtroEstado', 'filtroAtraso', 'filtroDesde', 'filtroHasta', 'ordenPrestamos']
         .forEach(id => {
-            document.getElementById(id).addEventListener('input', () => {
-                state.paginaActual = 1;
-                renderPrestamos();
-            });
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('input', () => {
+                    state.paginaActual = 1;
+                    renderPrestamos();
+                });
+            }
         });
 
-    document.getElementById('btnLimpiarFiltros').addEventListener('click', () => {
-        document.getElementById('filtroTexto').value = '';
-        document.getElementById('filtroHerramienta').value = '';
-        document.getElementById('filtroUsuario').value = '';
-        document.getElementById('filtroEstado').value = '';
-        document.getElementById('filtroAtraso').value = '';
-        document.getElementById('filtroDesde').value = '';
-        document.getElementById('filtroHasta').value = '';
-        document.getElementById('ordenPrestamos').value = 'salida_desc';
-        state.paginaActual = 1;
-        renderPrestamos();
-        mostrarFeedback('Filtros limpios: mostrando todo el historial.', 'neutral');
-    });
-
-    document.getElementById('btnPrevPage').addEventListener('click', () => {
-        if (state.paginaActual > 1) {
-            state.paginaActual--;
+    const btnLimpiarFiltros = document.getElementById('btnLimpiarFiltros');
+    if (btnLimpiarFiltros) {
+        btnLimpiarFiltros.addEventListener('click', () => {
+            const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+            setVal('filtroTexto', '');
+            setVal('filtroHerramienta', '');
+            setVal('filtroUsuario', '');
+            setVal('filtroEstado', '');
+            setVal('filtroAtraso', '');
+            setVal('filtroDesde', '');
+            setVal('filtroHasta', '');
+            setVal('ordenPrestamos', 'salida_desc');
+            state.paginaActual = 1;
             renderPrestamos();
-        }
-    });
+            mostrarFeedback('Filtros limpios: mostrando todo el historial.', 'neutral');
+        });
+    }
 
-    document.getElementById('btnNextPage').addEventListener('click', () => {
-        state.paginaActual++;
-        renderPrestamos();
-    });
+    const btnPrevPage = document.getElementById('btnPrevPage');
+    if (btnPrevPage) {
+        btnPrevPage.addEventListener('click', () => {
+            if (state.paginaActual > 1) {
+                state.paginaActual--;
+                renderPrestamos();
+            }
+        });
+    }
+
+    const btnNextPage = document.getElementById('btnNextPage');
+    if (btnNextPage) {
+        btnNextPage.addEventListener('click', () => {
+            state.paginaActual++;
+            renderPrestamos();
+        });
+    }
 
     // Simulador de concurrencia
-    document.getElementById('btnSimularConcurrencia').addEventListener('click', ejecutarPruebaConcurrencia);
+    const btnSimular = document.getElementById('btnSimularConcurrencia');
+    if (btnSimular) btnSimular.addEventListener('click', ejecutarPruebaConcurrencia);
 }
 
 // ============================================================================
 // CARGA DE DATOS DESDE SUPABASE
 // ============================================================================
 async function cargarTodo() {
-    const [resHerr, resUsu, resPres] = await Promise.all([
-        db.from('herramientas').select('*').order('codigo', { ascending: true }),
-        db.from('usuarios').select('*').order('nombre', { ascending: true }),
-        db.from('prestamos').select(`
-            *,
-            herramientas (id, codigo, descripcion, estado),
-            usuarios (id, documento, nombre)
-        `).order('fecha_salida', { ascending: false })
-    ]);
+    try {
+        const [resHerr, resUsu, resPres] = await Promise.all([
+            db.from('herramientas').select('*').order('codigo', { ascending: true }),
+            db.from('usuarios').select('*').order('nombre', { ascending: true }),
+            db.from('prestamos').select(`
+                *,
+                herramientas (id, codigo, descripcion, estado),
+                usuarios (id, documento, nombre)
+            `).order('fecha_salida', { ascending: false })
+        ]);
 
-    if (resHerr.error || resUsu.error || resPres.error) {
-        mostrarFeedback('Error de conexión con Supabase. Verifique URL y Anon Key.', 'error');
-        return;
+        if (resHerr.error || resUsu.error || resPres.error) {
+            console.error('Error detallado de Supabase:', {
+                herramientas: resHerr.error,
+                usuarios: resUsu.error,
+                prestamos: resPres.error
+            });
+            const primerError = resHerr.error || resUsu.error || resPres.error;
+            
+            if (primerError.code === '42P01' || primerError.message?.includes('does not exist')) {
+                mostrarFeedback('Aviso: Las tablas no existen en Supabase. Debe ejecutar el script SQL "mila.sql" en el SQL Editor del panel de Supabase.', 'error');
+            } else if (primerError.code === 'PGRST301' || primerError.message?.includes('JWT') || primerError.status === 401) {
+                mostrarFeedback('Error 401 (No autorizado): Verifique la clave Publishable o Anon Key en Supabase.', 'error');
+            } else {
+                mostrarFeedback(`Error de conexión con Supabase: ${primerError.message || primerError.details || 'Error desconocido'}`, 'error');
+            }
+            return;
+        }
+
+        state.herramientas = resHerr.data || [];
+        state.usuarios = resUsu.data || [];
+        state.prestamos = resPres.data || [];
+
+        actualizarKPIs();
+        poblarSelectores();
+        renderHerramientas();
+        renderUsuarios();
+        renderPrestamos();
+        mostrarFeedback('Datos cargados y sincronizados correctamente con Supabase.', 'success');
+    } catch (err) {
+        console.error('Excepción al conectar con Supabase:', err);
+        mostrarFeedback(`Error inesperado de red al contactar Supabase: ${err.message}`, 'error');
     }
-
-    state.herramientas = resHerr.data || [];
-    state.usuarios = resUsu.data || [];
-    state.prestamos = resPres.data || [];
-
-    actualizarKPIs();
-    poblarSelectores();
-    renderHerramientas();
-    renderUsuarios();
-    renderPrestamos();
 }
 
 function actualizarKPIs() {
@@ -153,10 +243,15 @@ function actualizarKPIs() {
     const vencidos = state.prestamos.filter(p => p.estado_prestamo === 'ACTIVO' && new Date(p.fecha_vencimiento) < ahora).length;
     const danados = state.prestamos.filter(p => p.estado_prestamo === 'DEVUELTO_DANADO').length;
 
-    document.getElementById('kpiLibres').textContent = libres;
-    document.getElementById('kpiVencidos').textContent = vencidos;
-    document.getElementById('kpiDanados').textContent = danados;
-    document.getElementById('kpiReparacion').textContent = reparacion;
+    const elLibres = document.getElementById('kpiLibres');
+    const elVencidos = document.getElementById('kpiVencidos');
+    const elDanados = document.getElementById('kpiDanados');
+    const elReparacion = document.getElementById('kpiReparacion');
+
+    if (elLibres) elLibres.textContent = libres;
+    if (elVencidos) elVencidos.textContent = vencidos;
+    if (elDanados) elDanados.textContent = danados;
+    if (elReparacion) elReparacion.textContent = reparacion;
 }
 
 function poblarSelectores() {
@@ -164,28 +259,34 @@ function poblarSelectores() {
     const selFilHerr = document.getElementById('filtroHerramienta');
     const selTestHerr = document.getElementById('testHerramienta');
 
-    selPresHerr.innerHTML = '<option value="">-- Seleccione herramienta --</option>';
-    selFilHerr.innerHTML = '<option value="">Todas las herramientas</option>';
-    selTestHerr.innerHTML = '';
+    if (selPresHerr) selPresHerr.innerHTML = '<option value="">-- Seleccione herramienta --</option>';
+    if (selFilHerr) selFilHerr.innerHTML = '<option value="">Todas las herramientas</option>';
+    if (selTestHerr) selTestHerr.innerHTML = '';
 
+    let hayLibres = false;
     state.herramientas.filter(h => h.activo).forEach(h => {
         const label = `${h.codigo} - ${h.descripcion} [${h.estado}]`;
-        selPresHerr.innerHTML += `<option value="${h.id}">${label}</option>`;
-        selFilHerr.innerHTML += `<option value="${h.id}">${h.codigo} - ${h.descripcion}</option>`;
+        if (selPresHerr) selPresHerr.innerHTML += `<option value="${h.id}">${label}</option>`;
+        if (selFilHerr) selFilHerr.innerHTML += `<option value="${h.id}">${h.codigo} - ${h.descripcion}</option>`;
         if (h.estado === 'LIBRE') {
-            selTestHerr.innerHTML += `<option value="${h.id}">${label}</option>`;
+            hayLibres = true;
+            if (selTestHerr) selTestHerr.innerHTML += `<option value="${h.id}">${label}</option>`;
         }
     });
 
+    if (selTestHerr && !hayLibres) {
+        selTestHerr.innerHTML = '<option value="">(No hay herramientas LIBRES disponibles)</option>';
+    }
+
     const selPresUsu = document.getElementById('prestamoUsuario');
     const selFilUsu = document.getElementById('filtroUsuario');
-    selPresUsu.innerHTML = '<option value="">-- Seleccione usuario --</option>';
-    selFilUsu.innerHTML = '<option value="">Todos los usuarios</option>';
+    if (selPresUsu) selPresUsu.innerHTML = '<option value="">-- Seleccione usuario --</option>';
+    if (selFilUsu) selFilUsu.innerHTML = '<option value="">Todos los usuarios</option>';
 
     state.usuarios.filter(u => u.activo).forEach(u => {
         const label = `${u.documento} - ${u.nombre}`;
-        selPresUsu.innerHTML += `<option value="${u.id}">${label}</option>`;
-        selFilUsu.innerHTML += `<option value="${u.id}">${label}</option>`;
+        if (selPresUsu) selPresUsu.innerHTML += `<option value="${u.id}">${label}</option>`;
+        if (selFilUsu) selFilUsu.innerHTML += `<option value="${u.id}">${label}</option>`;
     });
 }
 
@@ -194,12 +295,22 @@ function poblarSelectores() {
 // ============================================================================
 async function handleRegistrarPrestamo(e) {
     e.preventDefault();
-    if (state.rol !== 'ADMIN') return;
+    if (state.rol !== 'ADMIN') {
+        mostrarFeedback('Operación rechazada: Modo Consulta activo.', 'error');
+        return;
+    }
 
-    const herramientaId = document.getElementById('prestamoHerramienta').value;
-    const usuarioId = document.getElementById('prestamoUsuario').value;
-    const vencimiento = new Date(document.getElementById('prestamoVencimiento').value).toISOString();
-    const obs = document.getElementById('prestamoObs').value.trim();
+    const herramientaId = document.getElementById('prestamoHerramienta')?.value;
+    const usuarioId = document.getElementById('prestamoUsuario')?.value;
+    const inputVenc = document.getElementById('prestamoVencimiento')?.value;
+    const obs = document.getElementById('prestamoObs')?.value.trim();
+
+    if (!herramientaId || !usuarioId || !inputVenc) {
+        mostrarFeedback('RECHAZADO: Debe completar los campos obligatorios.', 'error');
+        return;
+    }
+
+    const vencimiento = new Date(inputVenc).toISOString();
 
     const { data, error } = await db.rpc('registrar_prestamo_seguro', {
         p_herramienta_id: herramientaId,
@@ -213,13 +324,13 @@ async function handleRegistrarPrestamo(e) {
         return;
     }
 
-    if (data.ok) {
+    if (data && data.ok) {
         mostrarFeedback(data.mensaje, 'success');
-        document.getElementById('prestamoObs').value = '';
+        const obsEl = document.getElementById('prestamoObs');
+        if (obsEl) obsEl.value = '';
         await cargarTodo();
     } else {
-        // Muestra explícitamente por qué se rechaza (ej: EN_REPARACION o PRESTADA)
-        mostrarFeedback(data.mensaje, 'error');
+        mostrarFeedback(data ? data.mensaje : 'Operación rechazada.', 'error');
     }
 }
 
@@ -228,24 +339,33 @@ window.abrirModalDevolucion = function(prestamoId) {
     const p = state.prestamos.find(item => item.id === prestamoId);
     if (!p) return;
 
-    document.getElementById('devPrestamoId').value = p.id;
-    document.getElementById('devCondicion').value = 'OK';
-    document.getElementById('devObservacion').value = '';
-    document.getElementById('modalDevDetalle').textContent =
-        `Herramienta: ${p.herramientas?.codigo} - ${p.herramientas?.descripcion} | Retirada por: ${p.usuarios?.nombre}`;
-    document.getElementById('modalDevolucion').classList.remove('hidden');
+    const devId = document.getElementById('devPrestamoId');
+    const devCond = document.getElementById('devCondicion');
+    const devObs = document.getElementById('devObservacion');
+    const devDet = document.getElementById('modalDevDetalle');
+    const modal = document.getElementById('modalDevolucion');
+
+    if (devId) devId.value = p.id;
+    if (devCond) devCond.value = 'OK';
+    if (devObs) devObs.value = '';
+    if (devDet) {
+        devDet.textContent = `Herramienta: ${p.herramientas?.codigo || ''} - ${p.herramientas?.descripcion || ''} | Retirada por: ${p.usuarios?.nombre || ''}`;
+    }
+    if (modal) modal.classList.remove('hidden');
 };
 
 async function handleConfirmarDevolucion(e) {
     e.preventDefault();
-    const prestamoId = document.getElementById('devPrestamoId').value;
-    const danada = document.getElementById('devCondicion').value === 'DANADA';
-    const observacion = document.getElementById('devObservacion').value;
+    if (state.rol !== 'ADMIN') return;
+
+    const prestamoId = document.getElementById('devPrestamoId')?.value;
+    const danada = document.getElementById('devCondicion')?.value === 'DANADA';
+    const observacion = document.getElementById('devObservacion')?.value.trim();
 
     const { data, error } = await db.rpc('registrar_devolucion_segura', {
         p_prestamo_id: prestamoId,
         p_danada: danada,
-        p_observacion: observacion
+        p_observacion: observacion || null
     });
 
     if (error) {
@@ -253,13 +373,12 @@ async function handleConfirmarDevolucion(e) {
         return;
     }
 
-    if (data.ok) {
-        document.getElementById('modalDevolucion').classList.add('hidden');
+    if (data && data.ok) {
+        document.getElementById('modalDevolucion')?.classList.add('hidden');
         mostrarFeedback(data.mensaje, danada ? 'error' : 'success');
         await cargarTodo();
     } else {
-        // Rechazo si devuelve dañada sin observación
-        mostrarFeedback(data.mensaje, 'error');
+        mostrarFeedback(data ? data.mensaje : 'Devolución rechazada.', 'error');
     }
 }
 
@@ -267,14 +386,14 @@ async function handleConfirmarDevolucion(e) {
 // RENDERIZADO DE PRÉSTAMOS CON BÚSQUEDA + FILTROS COMBINADOS + PAGINACIÓN
 // ============================================================================
 function renderPrestamos() {
-    const texto = document.getElementById('filtroTexto').value.toLowerCase().trim();
-    const fHerr = document.getElementById('filtroHerramienta').value;
-    const fUsu = document.getElementById('filtroUsuario').value;
-    const fEstado = document.getElementById('filtroEstado').value;
-    const fAtraso = document.getElementById('filtroAtraso').value;
-    const fDesde = document.getElementById('filtroDesde').value;
-    const fHasta = document.getElementById('filtroHasta').value;
-    const orden = document.getElementById('ordenPrestamos').value;
+    const texto = (document.getElementById('filtroTexto')?.value || '').toLowerCase().trim();
+    const fHerr = document.getElementById('filtroHerramienta')?.value || '';
+    const fUsu = document.getElementById('filtroUsuario')?.value || '';
+    const fEstado = document.getElementById('filtroEstado')?.value || '';
+    const fAtraso = document.getElementById('filtroAtraso')?.value || '';
+    const fDesde = document.getElementById('filtroDesde')?.value || '';
+    const fHasta = document.getElementById('filtroHasta')?.value || '';
+    const orden = document.getElementById('ordenPrestamos')?.value || 'salida_desc';
     const ahora = new Date();
 
     let filtrados = state.prestamos.filter(p => {
@@ -292,7 +411,7 @@ function renderPrestamos() {
         if (fHasta && new Date(p.fecha_salida) > new Date(fHasta + 'T23:59:59')) return false;
 
         if (texto) {
-            const blob = `${p.herramientas?.codigo} ${p.herramientas?.descripcion} ${p.usuarios?.documento} ${p.usuarios?.nombre} ${p.observacion || ''}`.toLowerCase();
+            const blob = `${p.herramientas?.codigo || ''} ${p.herramientas?.descripcion || ''} ${p.usuarios?.documento || ''} ${p.usuarios?.nombre || ''} ${p.observacion || ''}`.toLowerCase();
             if (!blob.includes(texto)) return false;
         }
         return true;
@@ -315,12 +434,24 @@ function renderPrestamos() {
     const inicio = (state.paginaActual - 1) * state.itemsPorPagina;
     const paginados = filtrados.slice(inicio, inicio + state.itemsPorPagina);
 
-    document.getElementById('totalResultados').textContent = `${total} registros encontrados`;
-    document.getElementById('pageInfo').textContent = `Página ${state.paginaActual} de ${totalPaginas}`;
-    document.getElementById('btnPrevPage').disabled = state.paginaActual <= 1;
-    document.getElementById('btnNextPage').disabled = state.paginaActual >= totalPaginas;
+    const elTotal = document.getElementById('totalResultados');
+    const elPageInfo = document.getElementById('pageInfo');
+    const btnPrev = document.getElementById('btnPrevPage');
+    const btnNext = document.getElementById('btnNextPage');
+
+    if (elTotal) elTotal.textContent = `${total} registros encontrados`;
+    if (elPageInfo) elPageInfo.textContent = `Página ${state.paginaActual} de ${totalPaginas}`;
+    if (btnPrev) btnPrev.disabled = state.paginaActual <= 1;
+    if (btnNext) btnNext.disabled = state.paginaActual >= totalPaginas;
 
     const tbody = document.getElementById('tbodyPrestamos');
+    if (!tbody) return;
+
+    if (paginados.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color: var(--muted); padding: 1.5rem;">No se encontraron registros que coincidan con los filtros.</td></tr>';
+        return;
+    }
+
     tbody.innerHTML = paginados.map(p => {
         const vencido = p.estado_prestamo === 'ACTIVO' && new Date(p.fecha_vencimiento) < ahora;
         const badgeClass = vencido ? 'st-vencido' : `st-${p.estado_prestamo.toLowerCase()}`;
@@ -350,7 +481,15 @@ function renderPrestamos() {
 // ============================================================================
 function renderHerramientas() {
     const tbody = document.getElementById('tbodyHerramientas');
-    tbody.innerHTML = state.herramientas.filter(h => h.activo).map(h => {
+    if (!tbody) return;
+
+    const activas = state.herramientas.filter(h => h.activo);
+    if (activas.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--muted); padding: 1.5rem;">No hay herramientas registradas.</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = activas.map(h => {
         const btnHabilitar = h.estado === 'EN_REPARACION'
             ? `<button class="btn btn-success btn-sm" onclick="habilitarHerramienta('${h.id}')">Habilitar (Libre)</button>`
             : '';
@@ -374,12 +513,14 @@ function renderHerramientas() {
 
 async function handleGuardarHerramienta(e) {
     e.preventDefault();
-    const id = document.getElementById('herramientaId').value;
+    if (state.rol !== 'ADMIN') return;
+
+    const id = document.getElementById('herramientaId')?.value;
     const payload = {
-        codigo: document.getElementById('herrCodigo').value.trim().toUpperCase(),
-        descripcion: document.getElementById('herrDescripcion').value.trim(),
-        categoria: document.getElementById('herrCategoria').value.trim() || 'General',
-        estado: document.getElementById('herrEstado').value
+        codigo: document.getElementById('herrCodigo')?.value.trim().toUpperCase(),
+        descripcion: document.getElementById('herrDescripcion')?.value.trim(),
+        categoria: document.getElementById('herrCategoria')?.value.trim() || 'General',
+        estado: document.getElementById('herrEstado')?.value || 'LIBRE'
     };
 
     const res = id
@@ -396,17 +537,25 @@ async function handleGuardarHerramienta(e) {
 }
 
 window.editarHerramienta = function(id) {
+    if (state.rol !== 'ADMIN') return;
     const h = state.herramientas.find(item => item.id === id);
     if (!h) return;
-    document.getElementById('herramientaId').value = h.id;
-    document.getElementById('herrCodigo').value = h.codigo;
-    document.getElementById('herrDescripcion').value = h.descripcion;
-    document.getElementById('herrCategoria').value = h.categoria || '';
-    document.getElementById('herrEstado').value = h.estado;
-    document.getElementById('tituloFormHerramienta').textContent = `Editando Herramienta: ${h.codigo}`;
+
+    const setVal = (elId, v) => { const el = document.getElementById(elId); if (el) el.value = v; };
+    setVal('herramientaId', h.id);
+    setVal('herrCodigo', h.codigo);
+    setVal('herrDescripcion', h.descripcion);
+    setVal('herrCategoria', h.categoria || '');
+    setVal('herrEstado', h.estado);
+
+    const titulo = document.getElementById('tituloFormHerramienta');
+    if (titulo) titulo.textContent = `Editando Herramienta: ${h.codigo}`;
+
+    document.getElementById('formHerramienta')?.scrollIntoView({ behavior: 'smooth' });
 };
 
 window.habilitarHerramienta = async function(id) {
+    if (state.rol !== 'ADMIN') return;
     const { error } = await db.from('herramientas').update({ estado: 'LIBRE' }).eq('id', id);
     if (error) {
         mostrarFeedback(`RECHAZADO: ${error.message}`, 'error');
@@ -417,22 +566,29 @@ window.habilitarHerramienta = async function(id) {
 };
 
 window.bajaHerramienta = async function(id) {
+    if (state.rol !== 'ADMIN') return;
     const h = state.herramientas.find(item => item.id === id);
-    if (h && h.estado === 'PRESTADA') {
+    if (!h) return;
+
+    if (h.estado === 'PRESTADA') {
         mostrarFeedback('RECHAZADO: No se puede dar de baja una herramienta que actualmente está PRESTADA.', 'error');
         return;
     }
     const { error } = await db.from('herramientas').update({ activo: false, estado: 'BAJA' }).eq('id', id);
-    if (!error) {
+    if (error) {
+        mostrarFeedback(`RECHAZADO al dar de baja herramienta: ${error.message}`, 'error');
+    } else {
         mostrarFeedback(`ACEPTADO: Herramienta [${h.codigo}] dada de baja conservando historial.`, 'success');
         await cargarTodo();
     }
 };
 
 function limpiarFormHerramienta() {
-    document.getElementById('formHerramienta').reset();
-    document.getElementById('herramientaId').value = '';
-    document.getElementById('tituloFormHerramienta').textContent = 'Alta / Edición de Herramienta';
+    document.getElementById('formHerramienta')?.reset();
+    const idEl = document.getElementById('herramientaId');
+    if (idEl) idEl.value = '';
+    const titEl = document.getElementById('tituloFormHerramienta');
+    if (titEl) titEl.textContent = 'Alta / Edición de Herramienta';
 }
 
 // ============================================================================
@@ -440,7 +596,15 @@ function limpiarFormHerramienta() {
 // ============================================================================
 function renderUsuarios() {
     const tbody = document.getElementById('tbodyUsuarios');
-    tbody.innerHTML = state.usuarios.filter(u => u.activo).map(u => `
+    if (!tbody) return;
+
+    const activos = state.usuarios.filter(u => u.activo);
+    if (activos.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--muted); padding: 1.5rem;">No hay usuarios registrados.</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = activos.map(u => `
         <tr>
             <td><strong>${u.documento}</strong></td>
             <td>${u.nombre}</td>
@@ -457,11 +621,13 @@ function renderUsuarios() {
 
 async function handleGuardarUsuario(e) {
     e.preventDefault();
-    const id = document.getElementById('usuarioId').value;
+    if (state.rol !== 'ADMIN') return;
+
+    const id = document.getElementById('usuarioId')?.value;
     const payload = {
-        documento: document.getElementById('usuDocumento').value.trim(),
-        nombre: document.getElementById('usuNombre').value.trim(),
-        sector_curso: document.getElementById('usuSector').value.trim() || 'Taller'
+        documento: document.getElementById('usuDocumento')?.value.trim(),
+        nombre: document.getElementById('usuNombre')?.value.trim(),
+        sector_curso: document.getElementById('usuSector')?.value.trim() || 'Taller'
     };
 
     const res = id
@@ -478,51 +644,75 @@ async function handleGuardarUsuario(e) {
 }
 
 window.editarUsuario = function(id) {
+    if (state.rol !== 'ADMIN') return;
     const u = state.usuarios.find(item => item.id === id);
     if (!u) return;
-    document.getElementById('usuarioId').value = u.id;
-    document.getElementById('usuDocumento').value = u.documento;
-    document.getElementById('usuNombre').value = u.nombre;
-    document.getElementById('usuSector').value = u.sector_curso || '';
-    document.getElementById('tituloFormUsuario').textContent = `Editando Usuario: ${u.nombre}`;
+
+    const setVal = (elId, v) => { const el = document.getElementById(elId); if (el) el.value = v; };
+    setVal('usuarioId', u.id);
+    setVal('usuDocumento', u.documento);
+    setVal('usuNombre', u.nombre);
+    setVal('usuSector', u.sector_curso || '');
+
+    const titEl = document.getElementById('tituloFormUsuario');
+    if (titEl) titEl.textContent = `Editando Usuario: ${u.nombre}`;
+
+    document.getElementById('formUsuario')?.scrollIntoView({ behavior: 'smooth' });
 };
 
 window.bajaUsuario = async function(id) {
+    if (state.rol !== 'ADMIN') return;
+    const u = state.usuarios.find(item => item.id === id);
+    if (!u) return;
+
     const tieneActivos = state.prestamos.some(p => p.usuario_id === id && p.estado_prestamo === 'ACTIVO');
     if (tieneActivos) {
         mostrarFeedback('RECHAZADO: El usuario tiene herramientas pendientes de devolución.', 'error');
         return;
     }
     const { error } = await db.from('usuarios').update({ activo: false }).eq('id', id);
-    if (!error) {
-        mostrarFeedback('ACEPTADO: Usuario dado de baja lógicamente (historial conservado).', 'success');
+    if (error) {
+        mostrarFeedback(`RECHAZADO al dar de baja usuario: ${error.message}`, 'error');
+    } else {
+        mostrarFeedback(`ACEPTADO: Usuario ${u.nombre} dado de baja lógicamente (historial conservado).`, 'success');
         await cargarTodo();
     }
 };
 
 function limpiarFormUsuario() {
-    document.getElementById('formUsuario').reset();
-    document.getElementById('usuarioId').value = '';
-    document.getElementById('tituloFormUsuario').textContent = 'Alta / Edición de Usuario';
+    document.getElementById('formUsuario')?.reset();
+    const idEl = document.getElementById('usuarioId');
+    if (idEl) idEl.value = '';
+    const titEl = document.getElementById('tituloFormUsuario');
+    if (titEl) titEl.textContent = 'Alta / Edición de Usuario';
 }
 
 // ============================================================================
 // PRUEBA DE CONCURRENCIA (2 SOLICITUDES SIMULTÁNEAS SOBRE LA MISMA UNIDAD)
 // ============================================================================
 async function ejecutarPruebaConcurrencia() {
-    const herramientaId = document.getElementById('testHerramienta').value;
-    const activos = state.usuarios.filter(u => u.activo);
-    const log = document.getElementById('logConcurrencia');
-
-    if (!herramientaId || activos.length < 2) {
-        log.textContent = 'ERROR: Se requiere al menos 1 herramienta LIBRE y 2 usuarios activos para ejecutar la prueba.';
+    if (state.rol !== 'ADMIN') {
+        mostrarFeedback('Operación bloqueada: Solo el Administrador puede ejecutar la prueba de concurrencia.', 'error');
         return;
     }
 
+    const herramientaId = document.getElementById('testHerramienta')?.value;
+    const activos = state.usuarios.filter(u => u.activo);
+    const log = document.getElementById('logConcurrencia');
+    if (!log) return;
+
+    if (!herramientaId || activos.length < 2) {
+        log.textContent = 'ERROR: Se requiere al menos 1 herramienta LIBRE seleccionada y 2 usuarios activos para ejecutar la prueba.';
+        mostrarFeedback('Prueba cancelada: Verifique que exista una herramienta libre y al menos 2 usuarios activos.', 'error');
+        return;
+    }
+
+    const hObj = state.herramientas.find(h => h.id === herramientaId);
     const venc = new Date(Date.now() + 86400000).toISOString();
     log.textContent = `Disparando 2 peticiones concurrentes en t = ${new Date().toISOString()}...\n` +
-        `Solicitud A -> Usuario: ${activos[0].nombre}\n` +
-        `Solicitud B -> Usuario: ${activos[1].nombre}\n\nProcesando en PostgreSQL...`;
+        `Herramienta objetivo: [${hObj ? hObj.codigo + ' - ' + hObj.descripcion : herramientaId}]\n` +
+        `Solicitud A -> Usuario: ${activos[0].nombre} (CI: ${activos[0].documento})\n` +
+        `Solicitud B -> Usuario: ${activos[1].nombre} (CI: ${activos[1].documento})\n\nProcesando con FOR UPDATE en PostgreSQL...`;
 
     const [resA, resB] = await Promise.all([
         db.rpc('registrar_prestamo_seguro', {
@@ -539,8 +729,11 @@ async function ejecutarPruebaConcurrencia() {
         })
     ]);
 
-    log.textContent += `\n\nRESULTADO SOLICITUD A (${activos[0].nombre}):\n${JSON.stringify(resA.data, null, 2)}` +
-        `\n\nRESULTADO SOLICITUD B (${activos[1].nombre}):\n${JSON.stringify(resB.data, null, 2)}`;
+    const resAData = resA.error ? { error: resA.error.message } : resA.data;
+    const resBData = resB.error ? { error: resB.error.message } : resB.data;
+
+    log.textContent += `\n\nRESULTADO SOLICITUD A (${activos[0].nombre}):\n${JSON.stringify(resAData, null, 2)}` +
+        `\n\nRESULTADO SOLICITUD B (${activos[1].nombre}):\n${JSON.stringify(resBData, null, 2)}`;
 
     mostrarFeedback('Prueba de concurrencia finalizada. Revise el resultado en la consola de pruebas.', 'success');
     await cargarTodo();
