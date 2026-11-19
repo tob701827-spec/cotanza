@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control de Préstamos de Herramientas | Proyecto 06</title>
+    <link rel="stylesheet" href="coty.css">
+    <!-- Cliente oficial de Supabase JS v2 -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <!-- Barra Superior y Selector de Rol -->
+    <header class="topbar">
+        <div class="brand">
+            <span class="badge-project">PROYECTO 06</span>
+            <div>
+                <h1>Gestión y Préstamo de Herramientas</h1>
+                <p>Colegio Nacional E.M.D. Asunción Escalada · Control por Unidad</p>
+            </div>
+        </div>
+
+        <div class="role-switcher">
+            <label for="selectRol">Modo de Acceso:</label>
+            <select id="selectRol">
+                <option value="ADMIN">Administrador (Operación Total)</option>
+                <option value="CONSULTA">Usuario de Consulta (Solo Lectura)</option>
+            </select>
+            <span id="rolBadge" class="role-badge admin">ADMIN</span>
+        </div>
+    </header>
+
+    <!-- Consola de Auditoría / Feedback Explícito (Aceptado / Rechazado) -->
+    <section class="container">
+        <div id="feedbackBanner" class="feedback-box neutral" role="status">
+            <strong>Estado del sistema:</strong> Listo para operar. Toda acción mostrará el motivo exacto de aceptación o rechazo.
+        </div>
+
+        <!-- PANEL DE CONTROL (KPIs obligatorios) -->
+        <div class="kpi-grid">
+            <div class="kpi-card kpi-free">
+                <span class="kpi-label">Herramientas Libres</span>
+                <strong id="kpiLibres" class="kpi-value">0</strong>
+                <small>Disponibles para entrega inmediata</small>
+            </div>
+            <div class="kpi-card kpi-overdue">
+                <span class="kpi-label">Préstamos Vencidos</span>
+                <strong id="kpiVencidos" class="kpi-value">0</strong>
+                <small>Activos con fecha límite superada</small>
+            </div>
+            <div class="kpi-card kpi-damaged">
+                <span class="kpi-label">Devoluciones con Daño</span>
+                <strong id="kpiDanados" class="kpi-value">0</strong>
+                <small>Historial de incidencias registradas</small>
+            </div>
+            <div class="kpi-card kpi-repair">
+                <span class="kpi-label">En Reparación (Bloqueadas)</span>
+                <strong id="kpiReparacion" class="kpi-value">0</strong>
+                <small>No habilitadas para préstamo</small>
+            </div>
+        </div>
+
+        <!-- Navegación por Pestañas -->
+        <nav class="tabs">
+            <button class="tab-btn active" data-tab="tab-prestamos">1. Préstamos y Devoluciones</button>
+            <button class="tab-btn" data-tab="tab-herramientas">2. Inventario de Herramientas</button>
+            <button class="tab-btn" data-tab="tab-usuarios">3. Usuarios Habilitados</button>
+            <button class="tab-btn" data-tab="tab-pruebas">4. Prueba Concurrencia & Auditoría</button>
+        </nav>
+
+        <!-- =============================================================== -->
+        <!-- PESTAÑA 1: PRÉSTAMOS, DEVOLUCIONES Y FILTROS COMBINADOS         -->
+        <!-- =============================================================== -->
+        <section id="tab-prestamos" class="tab-content active">
+            <!-- Formulario Nuevo Préstamo (Solo Admin) -->
+            <div class="card admin-only" id="cardNuevoPrestamo">
+                <h2>Registrar Entrega de Herramienta</h2>
+                <form id="formPrestamo" class="form-grid">
+                    <div class="form-group">
+                        <label for="prestamoHerramienta">Herramienta *</label>
+                        <select id="prestamoHerramienta" required></select>
+                        <small class="hint">Se muestran todas para validar bloqueo si está prestada o en reparación.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="prestamoUsuario">Usuario Solicitante *</label>
+                        <select id="prestamoUsuario" required></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="prestamoVencimiento">Fecha y Hora de Vencimiento *</label>
+                        <input type="datetime-local" id="prestamoVencimiento" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="prestamoObs">Observación de Salida (Opcional)</label>
+                        <input type="text" id="prestamoObs" placeholder="Ej: Incluye maletín y 2 baterías">
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Confirmar Entrega</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Búsqueda y Filtros Combinados + Orden + Paginación -->
+            <div class="card">
+                <div class="card-header-flex">
+                    <h2>Historial y Control de Préstamos</h2>
+                    <span id="totalResultados" class="pill-info">0 registros</span>
+                </div>
+
+                <div class="filters-grid">
+                    <div class="form-group">
+                        <label for="filtroTexto">Búsqueda Textual</label>
+                        <input type="text" id="filtroTexto" placeholder="Código, herramienta, nombre, CI u observación...">
+                    </div>
+                    <div class="form-group">
+                        <label for="filtroHerramienta">Filtro: Herramienta</label>
+                        <select id="filtroHerramienta">
+                            <option value="">Todas las herramientas</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="filtroUsuario">Filtro: Usuario</label>
+                        <select id="filtroUsuario">
+                            <option value="">Todos los usuarios</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="filtroEstado">Filtro: Estado</label>
+                        <select id="filtroEstado">
+                            <option value="">Todos los estados</option>
+                            <option value="ACTIVO">Activo (En curso)</option>
+                            <option value="DEVUELTO_OK">Devuelto OK</option>
+                            <option value="DEVUELTO_DANADO">Devuelto con Daño</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="filtroAtraso">Filtro: Atraso</label>
+                        <select id="filtroAtraso">
+                            <option value="">Todos</option>
+                            <option value="VENCIDO">Solo Vencidos / Atrasados</option>
+                            <option value="EN_TIEMPO">En tiempo / Sin atraso</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="filtroDesde">Período (Salida Desde)</label>
+                        <input type="date" id="filtroDesde">
+                    </div>
+                    <div class="form-group">
+                        <label for="filtroHasta">Período (Salida Hasta)</label>
+                        <input type="date" id="filtroHasta">
+                    </div>
+                    <div class="form-group">
+                        <label for="ordenPrestamos">Ordenar por</label>
+                        <select id="ordenPrestamos">
+                            <option value="salida_desc">Salida (Más reciente)</option>
+                            <option value="salida_asc">Salida (Más antigua)</option>
+                            <option value="vencimiento_asc">Vencimiento (Más próximo)</option>
+                            <option value="herramienta_asc">Herramienta (A-Z)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="filter-bar-actions">
+                    <button type="button" id="btnLimpiarFiltros" class="btn btn-secondary">Limpiar Filtros</button>
+                </div>
+
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Herramienta</th>
+                                <th>Usuario (Doc / Nombre)</th>
+                                <th>Salida</th>
+                                <th>Vencimiento</th>
+                                <th>Devolución</th>
+                                <th>Estado / Atraso</th>
+                                <th>Observación</th>
+                                <th class="admin-only">Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tbodyPrestamos"></tbody>
+                    </table>
+                </div>
+
+                <!-- Paginación -->
+                <div class="pagination-bar">
+                    <button id="btnPrevPage" class="btn btn-secondary">« Anterior</button>
+                    <span id="pageInfo">Página 1 de 1</span>
+                    <button id="btnNextPage" class="btn btn-secondary">Siguiente »</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- PESTAÑA 2: ABM DE HERRAMIENTAS                                  -->
+        <!-- =============================================================== -->
+        <section id="tab-herramientas" class="tab-content">
+            <div class="card admin-only">
+                <h2 id="tituloFormHerramienta">Alta / Edición de Herramienta</h2>
+                <form id="formHerramienta" class="form-grid">
+                    <input type="hidden" id="herramientaId">
+                    <div class="form-group">
+                        <label for="herrCodigo">Código Único *</label>
+                        <input type="text" id="herrCodigo" required placeholder="Ej: HER-007">
+                    </div>
+                    <div class="form-group">
+                        <label for="herrDescripcion">Descripción *</label>
+                        <input type="text" id="herrDescripcion" required placeholder="Ej: Osciloscopio Digital 100MHz">
+                    </div>
+                    <div class="form-group">
+                        <label for="herrCategoria">Categoría</label>
+                        <input type="text" id="herrCategoria" placeholder="Ej: Electrónica">
+                    </div>
+                    <div class="form-group">
+                        <label for="herrEstado">Estado Operativo *</label>
+                        <select id="herrEstado">
+                            <option value="LIBRE">LIBRE (Habilitada)</option>
+                            <option value="EN_REPARACION">EN_REPARACION (Bloqueada)</option>
+                            <option value="BAJA">BAJA (Fuera de servicio)</option>
+                        </select>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Guardar Herramienta</button>
+                        <button type="button" id="btnCancelarHerr" class="btn btn-secondary">Cancelar Edición</button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="card">
+                <h2>Catálogo de Herramientas por Unidad</h2>
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Código</th>
+                                <th>Descripción</th>
+                                <th>Categoría</th>
+                                <th>Estado</th>
+                                <th>Creado / Actualizado</th>
+                                <th class="admin-only">Acciones ABM</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tbodyHerramientas"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- PESTAÑA 3: ABM DE USUARIOS                                      -->
+        <!-- =============================================================== -->
+        <section id="tab-usuarios" class="tab-content">
+            <div class="card admin-only">
+                <h2 id="tituloFormUsuario">Alta / Edición de Usuario</h2>
+                <form id="formUsuario" class="form-grid">
+                    <input type="hidden" id="usuarioId">
+                    <div class="form-group">
+                        <label for="usuDocumento">Documento (CI) *</label>
+                        <input type="text" id="usuDocumento" required placeholder="Ej: 5123456">
+                    </div>
+                    <div class="form-group">
+                        <label for="usuNombre">Nombre Completo *</label>
+                        <input type="text" id="usuNombre" required placeholder="Ej: Juan Pérez">
+                    </div>
+                    <div class="form-group">
+                        <label for="usuSector">Curso / Sector</label>
+                        <input type="text" id="usuSector" placeholder="Ej: 2.º 3.ª BTI">
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Guardar Usuario</button>
+                        <button type="button" id="btnCancelarUsu" class="btn btn-secondary">Cancelar Edición</button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="card">
+                <h2>Padrón de Usuarios</h2>
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Documento</th>
+                                <th>Nombre</th>
+                                <th>Curso / Sector</th>
+                                <th>Estado</th>
+                                <th>Actualizado</th>
+                                <th class="admin-only">Acciones ABM</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tbodyUsuarios"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- PESTAÑA 4: SIMULADOR DE CONCURRENCIA (EVIDENCIA OBLIGATORIA)    -->
+        <!-- =============================================================== -->
+        <section id="tab-pruebas" class="tab-content">
+            <div class="card">
+                <h2>Prueba Individual Obligatoria: Concurrencia sobre Herramienta Libre</h2>
+                <p class="desc-text">
+                    Esta prueba dispara <strong>dos solicitudes simultáneas (<code>Promise.all</code>)</strong> hacia la función transaccional <code>registrar_prestamo_seguro</code> de PostgreSQL/Supabase sobre una misma herramienta <strong>LIBRE</strong> para dos usuarios distintos al mismo milisegundo. El bloqueo <code>FOR UPDATE</code> garantiza que exactamente una solicitud sea <strong>ACEPTADA</strong> y la segunda sea <strong>RECHAZADA</strong>.
+                </p>
+                <div class="form-grid admin-only">
+                    <div class="form-group">
+                        <label for="testHerramienta">Herramienta LIBRE para la prueba:</label>
+                        <select id="testHerramienta"></select>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" id="btnSimularConcurrencia" class="btn btn-warning">
+                            Ejecutar Prueba de Concurrencia (2 Solicitudes Simultáneas)
+                        </button>
+                    </div>
+                </div>
+                <pre id="logConcurrencia" class="console-log">Esperando ejecución de prueba...</pre>
+            </div>
+        </section>
+    </section>
+
+    <!-- Modal para Devolución (Normal o con Daño) -->
+    <div id="modalDevolucion" class="modal hidden">
+        <div class="modal-content">
+            <h3>Registrar Devolución de Herramienta</h3>
+            <p id="modalDevDetalle"></p>
+            <form id="formDevolucion">
+                <input type="hidden" id="devPrestamoId">
+                <div class="form-group">
+                    <label>Condición de entrega:</label>
+                    <select id="devCondicion">
+                        <option value="OK">Sin daño (Vuelve a estado LIBRE)</option>
+                        <option value="DANADA">Con daño (Pasa a EN_REPARACION y exige observación)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="devObservacion">Observación (Obligatoria si tiene daño):</label>
+                    <textarea id="devObservacion" rows="3" placeholder="Describa el estado de la herramienta o el daño detectado..."></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button type="submit" class="btn btn-primary">Confirmar Devolución</button>
+                    <button type="button" id="btnCerrarModal" class="btn btn-secondary">Cancelar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="mili.js"></script>
+</body>
+</html>

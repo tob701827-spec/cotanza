@@ -1,0 +1,245 @@
+-- ==============================================================================
+-- PROYECTO INDIVIDUAL 06: PRÉSTAMOS DE HERRAMIENTAS (SUPABASE / POSTGRESQL)
+-- ==============================================================================
+
+-- 1. Función para actualizar automáticamente updated_at
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 2. Tabla: herramientas
+CREATE TABLE IF NOT EXISTS herramientas (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    codigo VARCHAR(30) UNIQUE NOT NULL,
+    descripcion VARCHAR(150) NOT NULL,
+    categoria VARCHAR(60) DEFAULT 'General',
+    estado VARCHAR(20) NOT NULL DEFAULT 'LIBRE' 
+        CHECK (estado IN ('LIBRE', 'PRESTADA', 'EN_REPARACION', 'BAJA')),
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER trg_herramientas_updated
+BEFORE UPDATE ON herramientas
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 3. Tabla: usuarios (personas que retiran herramientas)
+CREATE TABLE IF NOT EXISTS usuarios (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    documento VARCHAR(30) UNIQUE NOT NULL,
+    nombre VARCHAR(120) NOT NULL,
+    sector_curso VARCHAR(80) DEFAULT 'Taller',
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER trg_usuarios_updated
+BEFORE UPDATE ON usuarios
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 4. Tabla: prestamos (historial completo y operaciones activas)
+CREATE TABLE IF NOT EXISTS prestamos (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    herramienta_id UUID NOT NULL REFERENCES herramientas(id) ON DELETE RESTRICT,
+    usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
+    fecha_salida TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fecha_vencimiento TIMESTAMPTZ NOT NULL,
+    fecha_devolucion TIMESTAMPTZ NULL,
+    estado_prestamo VARCHAR(25) NOT NULL DEFAULT 'ACTIVO'
+        CHECK (estado_prestamo IN ('ACTIVO', 'DEVUELTO_OK', 'DEVUELTO_DANADO')),
+    observacion TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER trg_prestamos_updated
+BEFORE UPDATE ON prestamos
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 5. FUNCIÓN TRANSACCIONAL ANTI-CONCURRENCIA: Registrar Préstamo
+-- Bloquea la fila de la herramienta (FOR UPDATE) para evitar doble préstamo simultáneo
+CREATE OR REPLACE FUNCTION registrar_prestamo_seguro(
+    p_herramienta_id UUID,
+    p_usuario_id UUID,
+    p_fecha_vencimiento TIMESTAMPTZ,
+    p_observacion TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_herramienta RECORD;
+    v_usuario RECORD;
+    v_prestamo_id UUID;
+BEGIN
+    -- Validar usuario activo
+    SELECT * INTO v_usuario FROM usuarios WHERE id = p_usuario_id AND activo = TRUE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'ok', FALSE,
+            'mensaje', 'RECHAZADO: El usuario seleccionado no existe o está dado de baja.'
+        );
+    END IF;
+
+    -- Bloqueo exclusivo de fila para prevenir condición de carrera (concurrencia)
+    SELECT * INTO v_herramienta 
+    FROM herramientas 
+    WHERE id = p_herramienta_id 
+    FOR UPDATE;
+
+    IF NOT FOUND OR v_herramienta.activo = FALSE THEN
+        RETURN jsonb_build_object(
+            'ok', FALSE,
+            'mensaje', 'RECHAZADO: La herramienta no existe o está inactiva.'
+        );
+    END IF;
+
+    -- Regla de negocio: Bloquear herramientas en reparación o prestadas
+    IF v_herramienta.estado <> 'LIBRE' THEN
+        RETURN jsonb_build_object(
+            'ok', FALSE,
+            'mensaje', format(
+                'RECHAZADO: La herramienta [%s - %s] no está disponible. Estado actual: %s.',
+                v_herramienta.codigo, v_herramienta.descripcion, v_herramienta.estado
+            )
+        );
+    END IF;
+
+    -- Insertar préstamo
+    INSERT INTO prestamos (herramienta_id, usuario_id, fecha_salida, fecha_vencimiento, estado_prestamo, observacion)
+    VALUES (p_herramienta_id, p_usuario_id, NOW(), p_fecha_vencimiento, 'ACTIVO', p_observacion)
+    RETURNING id INTO v_prestamo_id;
+
+    -- Actualizar estado de la herramienta a PRESTADA
+    UPDATE herramientas SET estado = 'PRESTADA' WHERE id = p_herramienta_id;
+
+    RETURN jsonb_build_object(
+        'ok', TRUE,
+        'prestamo_id', v_prestamo_id,
+        'mensaje', format(
+            'ACEPTADO: Herramienta [%s] entregada a %s (CI: %s).',
+            v_herramienta.codigo, v_usuario.nombre, v_usuario.documento
+        )
+    );
+END;
+$$;
+
+-- 6. FUNCIÓN TRANSACCIONAL: Registrar Devolución (Normal o Dañada)
+CREATE OR REPLACE FUNCTION registrar_devolucion_segura(
+    p_prestamo_id UUID,
+    p_danada BOOLEAN,
+    p_observacion TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_prestamo RECORD;
+    v_nuevo_estado_herramienta VARCHAR(20);
+    v_nuevo_estado_prestamo VARCHAR(25);
+BEGIN
+    SELECT * INTO v_prestamo FROM prestamos WHERE id = p_prestamo_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', FALSE, 'mensaje', 'RECHAZADO: El registro de préstamo no existe.');
+    END IF;
+
+    IF v_prestamo.estado_prestamo <> 'ACTIVO' THEN
+        RETURN jsonb_build_object('ok', FALSE, 'mensaje', 'RECHAZADO: Este préstamo ya fue cerrado anteriormente.');
+    END IF;
+
+    -- Regla: Exigir observación obligatoria al devolver dañada
+    IF p_danada = TRUE AND (p_observacion IS NULL OR LENGTH(TRIM(p_observacion)) < 5) THEN
+        RETURN jsonb_build_object(
+            'ok', FALSE,
+            'mensaje', 'RECHAZADO: Debe ingresar una observación detallada (mínimo 5 caracteres) al devolver una herramienta dañada.'
+        );
+    END IF;
+
+    IF p_danada = TRUE THEN
+        v_nuevo_estado_herramienta := 'EN_REPARACION';
+        v_nuevo_estado_prestamo := 'DEVUELTO_DANADO';
+    ELSE
+        v_nuevo_estado_herramienta := 'LIBRE';
+        v_nuevo_estado_prestamo := 'DEVUELTO_OK';
+    END IF;
+
+    -- Actualizar historial del préstamo sin borrar registro
+    UPDATE prestamos
+    SET fecha_devolucion = NOW(),
+        estado_prestamo = v_nuevo_estado_prestamo,
+        observacion = COALESCE(NULLIF(TRIM(p_observacion), ''), observacion)
+    WHERE id = p_prestamo_id;
+
+    -- Actualizar estado de la herramienta
+    UPDATE herramientas
+    SET estado = v_nuevo_estado_herramienta
+    WHERE id = v_prestamo.herramienta_id;
+
+    IF p_danada = TRUE THEN
+        RETURN jsonb_build_object(
+            'ok', TRUE,
+            'mensaje', 'ACEPTADO CON ALERTA: Devolución registrada con daño. La herramienta pasó a estado EN_REPARACION y quedó bloqueada para nuevos préstamos.'
+        );
+    ELSE
+        RETURN jsonb_build_object(
+            'ok', TRUE,
+            'mensaje', 'ACEPTADO: Devolución sin novedades. La herramienta vuelve a estar LIBRE.'
+        );
+    END IF;
+END;
+$$;
+
+-- 7. Habilitar acceso API (RLS abierto para demo académica con clave anon; en producción usar Supabase Auth)
+ALTER TABLE herramientas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuarios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE prestamos ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Acceso total herramientas" ON herramientas FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Acceso total usuarios" ON usuarios FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Acceso total prestamos" ON prestamos FOR ALL USING (true) WITH CHECK (true);
+
+-- 8. Datos iniciales de prueba para la defensa
+INSERT INTO herramientas (codigo, descripcion, categoria, estado) VALUES
+('HER-001', 'Taladro Percutor Bosch 750W', 'Eléctricas', 'LIBRE'),
+('HER-002', 'Multímetro Digital Fluke 115', 'Medición', 'LIBRE'),
+('HER-003', 'Soldador de Estaño 60W Punta Cerámica', 'Electrónica', 'EN_REPARACION'),
+('HER-004', 'Juego de Destornilladores Aislados 1000V', 'Manuales', 'PRESTADA'),
+('HER-005', 'Crimpadora RJ45 / RJ11 Profesional', 'Redes', 'LIBRE'),
+('HER-006', 'Llave Dinamométrica 1/2 pulgada', 'Mecánica', 'LIBRE');
+
+INSERT INTO usuarios (documento, nombre, sector_curso) VALUES
+('5412890', 'Constanza Milagros Giménez Zárate', '2.º 3.ª BTI'),
+('6123450', 'Lucas Sebastián Benítez', '2.º 3.ª BTI'),
+('4987321', 'Prof. Carlos Alberto Méndez', 'Docente Laboratorio'),
+('5890123', 'Sofía Valentina Romero', '3.º 1.ª BTI');
+
+-- Insertar un préstamo vencido y una devolución dañada histórica para nutrir el Panel y Filtros
+INSERT INTO prestamos (herramienta_id, usuario_id, fecha_salida, fecha_vencimiento, estado_prestamo, observacion)
+SELECT 
+    (SELECT id FROM herramientas WHERE codigo = 'HER-004'),
+    (SELECT id FROM usuarios WHERE documento = '6123450'),
+    NOW() - INTERVAL '5 days',
+    NOW() - INTERVAL '2 days',
+    'ACTIVO',
+    'Préstamo para práctica de tablero eléctrico (VENCIDO)'
+;
+
+INSERT INTO prestamos (herramienta_id, usuario_id, fecha_salida, fecha_vencimiento, fecha_devolucion, estado_prestamo, observacion)
+SELECT 
+    (SELECT id FROM herramientas WHERE codigo = 'HER-003'),
+    (SELECT id FROM usuarios WHERE documento = '5890123'),
+    NOW() - INTERVAL '7 days',
+    NOW() - INTERVAL '6 days',
+    NOW() - INTERVAL '6 days',
+    'DEVUELTO_DANADO',
+    'Cable de alimentación pelado y resistencia sin calentar. Enviado a reparación.'
+;
