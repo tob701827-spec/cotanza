@@ -2,7 +2,7 @@
 // CONFIGURACIÓN DE SUPABASE (Reemplazar con tus credenciales del proyecto)
 // ============================================================================
 const SUPABASE_URL = 'https://ekgwlcopjscwuzlwsywv.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_Fq5OHITtfQApgRn5mPaefw_t_cJ455u';
+const SUPABASE_ANON_KEY = "sb_publishable_Fq5OHITtfQApgRn5mPaefw_t_cJ455u"
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Estado global en memoria
